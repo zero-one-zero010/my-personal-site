@@ -1,16 +1,10 @@
 <!-- ProfileSection.vue -->
 <script setup>
 import { ref, onMounted } from "vue";
-import { createClient } from "@supabase/supabase-js";
+import { api, assetUrl } from "../api";
 
-// 1. 初始化Supabase（替换成你的实际KEY，桶名已改）
-const SUPABASE_URL = "https://qqrueinnfqmccfwiqczw.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_3PP6lvPA8MWhZFpdac3O4w_eWtwDlF0";
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// 个人信息数据（完全保留你的配置）
 const profileData = ref({
-  avatar: "/头像.jpg", // 头像用Public文件夹
+  avatar: "/头像.jpg",
   nickname: "Zero",
   birthday: "2005-07",
   constellation: "狮子座🦁",
@@ -24,42 +18,18 @@ const profileData = ref({
   qianming: "慢热喜静，往自由里去🌿",
 });
 
-// 影像集核心配置
-const photoGallery = ref([]); // 存储Supabase读取的图片URL
-const isLoading = ref(true); // 加载状态
-const activeIndex = ref(0); // 当前选中的大图索引
-const placeholderImg = "https://via.placeholder.com/800x500?text=暂无图片"; // 大图占位
+const photoGallery = ref([]);
+const isLoading = ref(true);
+const activeIndex = ref(0);
+const placeholderImg = "https://via.placeholder.com/800x500?text=暂无图片";
 
-// 2. 从Supabase读取影像集图片（适配桶名profile-gallery + 无子文件夹）
-const getSupabaseGallery = async () => {
+const getGallery = async () => {
   try {
     isLoading.value = true;
-    // 关键修改：桶名改为profile-gallery，读取根目录（空字符串表示根目录）
-    const { data: galleryFiles, error } = await supabase.storage
-      .from("my-site-files") // 你的实际桶名
-      .list("profile-gallery", {
-        // 空字符串 = 读取桶的根目录（无子文件夹）
-        limit: 100,
-        offset: 0,
-        sortBy: { column: "name", order: "asc" },
-      });
-
-    if (error) throw error;
-
-    // 转换为公开访问URL（同样适配根目录）
-    const galleryUrls = [];
-    for (const file of galleryFiles) {
-      // 过滤系统文件（如.DS_Store）
-      if (!file.name.includes(".DS_Store")) {
-        const { data: urlData } = supabase.storage
-          .from("my-site-files") // 你的实际桶名
-          .getPublicUrl(`profile-gallery/${file.name}`); // 根目录直接用文件名，无需文件夹前缀
-        galleryUrls.push(urlData.publicUrl);
-      }
-    }
-
+    const data = await api.getGallery();
+    const galleryUrls = (data.images || []).map((path) => assetUrl(path));
     photoGallery.value = galleryUrls;
-    activeIndex.value = galleryUrls.length > 0 ? 0 : -1; // 有图片默认选第一张
+    activeIndex.value = galleryUrls.length > 0 ? 0 : -1;
   } catch (e) {
     console.error("读取影像集失败:", e);
     photoGallery.value = [];
@@ -68,12 +38,10 @@ const getSupabaseGallery = async () => {
   }
 };
 
-// 3. 切换大图方法（新增上一张/下一张逻辑）
 const switchImage = (index) => {
   activeIndex.value = index;
 };
 
-// 新增：上一张
 const prevImage = () => {
   if (photoGallery.value.length === 0) return;
   activeIndex.value =
@@ -81,15 +49,13 @@ const prevImage = () => {
     photoGallery.value.length;
 };
 
-// 新增：下一张
 const nextImage = () => {
   if (photoGallery.value.length === 0) return;
   activeIndex.value = (activeIndex.value + 1) % photoGallery.value.length;
 };
 
-// 4. 页面加载时初始化
 onMounted(() => {
-  getSupabaseGallery();
+  getGallery();
 });
 </script>
 

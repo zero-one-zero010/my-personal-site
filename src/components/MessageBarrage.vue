@@ -1,29 +1,20 @@
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick } from "vue";
-import { createClient } from "@supabase/supabase-js";
+import { api } from "../api";
 
-// 1. Supabase 配置
-const SUPABASE_URL = "https://qqrueinnfqmccfwiqczw.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_3PP6lvPA8MWhZFpdac3O4w_eWtwDlF0";
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// 2. 响应式数据
 const nickname = ref("");
 const messageContent = ref("");
 const messages = ref([]);
 const isSending = ref(false);
 const showError = ref("");
-const barrageList = ref([]); //弹幕列表
+const barrageList = ref([]);
 let barrageTimer = null;
 
-// 3. 格式化时间 —— 和日记代码完全一致（核心修复）
 const formatTime = (dateStr) => {
   if (!dateStr) return "无";
 
-  // 核心修复：如果时间字符串不包含 '+' 或 'Z'，说明是纯 timestamp，需要手动处理偏移
   let d = new Date(dateStr);
 
-  // 如果数据库存的是 UTC 且没带标识，我们要手动补上那 8 小时的毫秒数
   if (!dateStr.includes("+") && !dateStr.toLowerCase().includes("z")) {
     d = new Date(d.getTime() + 8 * 60 * 60 * 1000);
   }
@@ -36,22 +27,14 @@ const formatTime = (dateStr) => {
     .padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
 };
 
-// 4. 获取留言
 const fetchMessages = async () => {
   try {
-    const { data, error } = await supabase
-      .from("messages")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
+    const data = await api.getMessages();
     messages.value = data.map((item) => ({
       ...item,
       formattedTime: formatTime(item.created_at),
     }));
     initBarrage();
-    // 初始化弹幕
-    // catch 块：捕获try里的所有错误，执行错误处理
   } catch (e) {
     console.error("获取留言失败:", e.message);
     showError.value = "加载留言失败，请稍后重试";
@@ -126,47 +109,33 @@ const sendMessage = async () => {
   isSending.value = true;
 
   try {
-    // 1. 发送数据并立即获取返回结果
-    const { data, error } = await supabase
-      .from("messages")
-      .insert([
-        {
-          nickname: nickname.value.trim(),
-          content: messageContent.value.trim(),
-        },
-      ])
-      .select(); // 必须带上 .select() 才能拿到刚存进去的带 ID 和时间的数据
+    const luckyMsg = await api.createMessage(
+      nickname.value.trim(),
+      messageContent.value.trim()
+    );
 
-    if (error) throw error;
+    const formatted = {
+      ...luckyMsg,
+      formattedTime: formatTime(luckyMsg.created_at),
+    };
+    messages.value.unshift(formatted);
 
-    // 2. 插队逻辑：让弹幕“秒出”
-    if (data && data[0]) {
-      const luckyMsg = data[0];
-      const immediateItem = {
-        // 使用 temp 前缀区分，防止与 Realtime 推送过来的 ID 冲突
-        id: "temp-" + luckyMsg.id,
-        nickname: luckyMsg.nickname,
-        content: luckyMsg.content,
-        time: formatTime(luckyMsg.created_at), // 确保使用了你之前的 formatTime 函数
-        top: `${Math.floor(Math.random() * 80) + 10}%`,
-        speed: 18, // 保持与你 initBarrage 一致的速度
-        start: false,
-      };
+    const immediateItem = {
+      id: "temp-" + luckyMsg.id,
+      nickname: luckyMsg.nickname,
+      content: luckyMsg.content,
+      time: formatted.formattedTime,
+      top: `${Math.floor(Math.random() * 80) + 10}%`,
+      speed: 18,
+      start: false,
+    };
 
-      // 直接推进显示列表，实现零延迟发射
-      barrageList.value.push(immediateItem);
+    barrageList.value.push(immediateItem);
+    nextTick(() => {
+      immediateItem.start = true;
+    });
 
-      // 必须在 nextTick 里改变 start，否则 CSS 动画无法触发
-      nextTick(() => {
-        immediateItem.start = true;
-      });
-    }
-
-    // 3. 清空输入框
     messageContent.value = "";
-
-    // --- 重要：删掉了 await fetchMessages() ---
-    // 理由：Realtime 已经监听了 INSERT 事件，它会自动帮你更新 messages.value 数组
   } catch (e) {
     console.error("发送留言失败:", e.message);
     showError.value = "发送失败，请稍后重试";
@@ -175,51 +144,12 @@ const sendMessage = async () => {
   }
 };
 
-// 7. 生命周期
-let messageChannel = null;
-
 onMounted(() => {
-  // 1. 依然先获取现有留言（保持原样）
   fetchMessages();
-
-  // 2. 开启实时监听 (Realtime)
-  // 注意：确保你在 Supabase 后台的 Replication 里开启了 messages 表的 Realtime 开关
-  messageChannel = supabase
-    .channel("public:messages") // 频道起个名字
-    .on(
-      "postgres_changes",
-      {
-        event: "INSERT", // 仅监听插入操作
-        schema: "public",
-        table: "messages",
-      },
-      (payload) => {
-        // payload.new 就是数据库刚存入的那条新数据
-        console.log("实时收到新消息:", payload.new);
-
-        // 核心修复：手动处理时区并格式化
-        const newMessage = {
-          ...payload.new,
-          formattedTime: formatTime(payload.new.created_at),
-        };
-
-        // 将新消息塞进数组最前面（这样页面和弹幕就能感应到变化）
-        messages.value.unshift(newMessage);
-
-        // 可选：如果希望发完立即出弹幕而不等计时器，可以在这里微调 initBarrage
-      }
-    )
-    .subscribe();
 });
 
 onUnmounted(() => {
-  // 1. 清除弹幕定时器（保持原样）
   if (barrageTimer) clearInterval(barrageTimer);
-
-  // 2. 断开实时连接（非常重要，否则会消耗连接数并导致内存泄漏）
-  if (messageChannel) {
-    supabase.removeChannel(messageChannel);
-  }
 });
 </script>
 

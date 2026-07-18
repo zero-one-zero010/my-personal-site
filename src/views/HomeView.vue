@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from "vue";
-import { createClient } from "@supabase/supabase-js";
+import { api } from "../api";
 import WeatherCard from "../components/WeatherCard.vue";
 import MusicPlayer from "../components/MusicPlayer.vue";
 import Clock from "../components/Clock.vue";
@@ -8,10 +8,6 @@ import Diary from "../components/Diary.vue";
 import ProfileSection from "../components/ProfileSection.vue";
 import MessageBarrage from "../components/MessageBarrage.vue";
 import TimeGreetingBanner from "../components/TimeGreetingBanner.vue";
-// Supabase 配置（保留）
-const SUPABASE_URL = "https://qqrueinnfqmccfwiqczw.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_3PP6lvPA8MWhZFpdac3O4w_eWtwDlF0";
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // 城市数据（保留）
 const cities = ref([
@@ -68,13 +64,9 @@ let bgTimer = null;
 
 let map = null;
 
-// 获取天气数据（保留）
 const fetchWeather = async () => {
   try {
-    const { data, error } = await supabase
-      .from("footprints")
-      .select("name, temp, sunrise, sunset");
-    if (error) throw error;
+    const data = await api.getFootprints();
     data.forEach((item) => {
       const city = cities.value.find((c) => c.name === item.name);
       if (city) {
@@ -84,7 +76,7 @@ const fetchWeather = async () => {
       }
     });
   } catch (e) {
-    console.error("获取 Supabase 天气数据失败:", e.message);
+    console.error("获取天气数据失败:", e.message);
   }
 };
 
