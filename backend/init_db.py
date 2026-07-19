@@ -35,6 +35,13 @@ CREATE TABLE IF NOT EXISTS diary (
   UNIQUE(year, month, day)
 );
 
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 INSERT OR IGNORE INTO footprints (name, temp, sunrise, sunset) VALUES
   ('北京', '18°C', '05:12', '19:30'),
   ('广州', '28°C', '06:05', '18:50'),

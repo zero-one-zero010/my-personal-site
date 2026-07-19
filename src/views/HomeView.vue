@@ -5,6 +5,7 @@ import WeatherCard from "../components/WeatherCard.vue";
 import MusicPlayer from "../components/MusicPlayer.vue";
 import Clock from "../components/Clock.vue";
 import Diary from "../components/Diary.vue";
+import AiChat from "../components/AiChat.vue";
 import ProfileSection from "../components/ProfileSection.vue";
 import MessageBarrage from "../components/MessageBarrage.vue";
 import TimeGreetingBanner from "../components/TimeGreetingBanner.vue";
@@ -206,6 +207,7 @@ const fly = (c) => map && map.setZoomAndCenter(10, c.center);
         ></div>
       </div>
       <Diary />
+      <AiChat />
     </div>
   </div>
 </template>

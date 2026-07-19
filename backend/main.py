@@ -1,10 +1,14 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import json
+import os
 import sqlite3
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from openai import OpenAI
 from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).parent
@@ -16,7 +20,34 @@ GALLERY_DIR = UPLOAD_DIR / "gallery"
 DIARY_DIR.mkdir(parents=True, exist_ok=True)
 GALLERY_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def load_env_file():
+    """Load backend/.env into process env (does not override existing vars)."""
+    env_path = BASE_DIR / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_env_file()
+
 app = FastAPI(title="my-footprints-api")
+
+
+def get_deepseek_client() -> OpenAI:
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="未配置 DEEPSEEK_API_KEY")
+    return OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,6 +66,25 @@ def get_db():
     return conn
 
 
+def ensure_chat_table():
+    conn = get_db()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+ensure_chat_table()
+
+
 class MessageIn(BaseModel):
     nickname: str
     content: str
@@ -46,6 +96,10 @@ class DiaryIn(BaseModel):
     day: int
     content: str
     image_url: str = ""
+
+
+class ChatIn(BaseModel):
+    content: str
 
 
 @app.get("/api/health")
@@ -158,7 +212,6 @@ def save_diary(body: DiaryIn):
 async def upload_diary_image(file: UploadFile = File(...)):
     suffix = Path(file.filename or "img.jpg").suffix or ".jpg"
     name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{file.filename or 'img'}{suffix}"
-    # 避免文件名重复奇怪字符，简单处理
     safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)
     save_path = DIARY_DIR / safe_name
 
@@ -170,7 +223,6 @@ async def upload_diary_image(file: UploadFile = File(...)):
 
 @app.delete("/api/diary/image")
 def delete_diary_image(url: str, year: int, month: int, day: int):
-    # url 形如 /uploads/diary/xxx.jpg
     filename = url.rstrip("/").split("/")[-1]
     file_path = DIARY_DIR / filename
     if file_path.exists():
@@ -198,3 +250,107 @@ def list_gallery():
         if p.is_file() and p.suffix.lower() in exts
     ]
     return {"images": files}
+
+
+@app.get("/api/chat/history")
+def chat_history():
+    conn = get_db()
+    rows = conn.execute(
+        """
+        SELECT id, role, content, created_at
+        FROM chat_messages
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.delete("/api/chat/history")
+def clear_chat_history():
+    conn = get_db()
+    conn.execute("DELETE FROM chat_messages")
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/chat")
+def chat(body: ChatIn):
+    content = (body.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="内容不能为空")
+
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        raise HTTPException(status_code=500, detail="未配置 DEEPSEEK_API_KEY")
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+
+    history_rows = conn.execute(
+        """
+        SELECT role, content FROM chat_messages
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    history = [{"role": r["role"], "content": r["content"]} for r in history_rows]
+
+    conn.execute(
+        "INSERT INTO chat_messages (role, content, created_at) VALUES (?, ?, ?)",
+        ("user", content, now),
+    )
+    conn.commit()
+    conn.close()
+
+    context = (history + [{"role": "user", "content": content}])[-40:]
+    messages_payload = [
+        {
+            "role": "system",
+            "content": "你是个人站点助手，回答简洁友好，使用中文。",
+        },
+        *context,
+    ]
+    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+
+    def event_stream():
+        full_parts = []
+        try:
+            client = get_deepseek_client()
+            stream = client.chat.completions.create(
+                model=model,
+                messages=messages_payload,
+                stream=True,
+            )
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content or ""
+                if not delta:
+                    continue
+                full_parts.append(delta)
+                yield f"data: {json.dumps({'type': 'delta', 'content': delta}, ensure_ascii=False)}\n\n"
+
+            reply = "".join(full_parts)
+            reply_time = datetime.now(timezone.utc).isoformat()
+            db = get_db()
+            cur = db.execute(
+                "INSERT INTO chat_messages (role, content, created_at) VALUES (?, ?, ?)",
+                ("assistant", reply, reply_time),
+            )
+            db.commit()
+            assistant_id = cur.lastrowid
+            db.close()
+
+            yield f"data: {json.dumps({'type': 'done', 'id': assistant_id, 'content': reply, 'created_at': reply_time}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
